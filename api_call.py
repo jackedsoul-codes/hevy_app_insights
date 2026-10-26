@@ -7,8 +7,8 @@ load_dotenv()
 #Set up authentication details
 API_KEY = os.getenv("HEVY_API_KEY")
 print("API key loaded:", bool(API_KEY))
-
-URL = "https://api.hevyapp.com/v1/workouts"
+PATH = "https://api.hevyapp.com/"
+URL = f"{PATH}v1/user/info"
 
 #Build headers matching Hevy's expectations
 headers = {
