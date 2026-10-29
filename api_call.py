@@ -24,13 +24,14 @@ headers = {
     "Accept": "application/json"
 }
 
-# Add optional pagination parameters
-params = {
-    "page": current_page,
-    "pageSize": max_page_size
-}
 
 while True:
+    
+    # Add optional pagination parameters
+    params = {
+        "page": current_page,
+        "pageSize": max_page_size
+    }
     
     try:
         response = requests.get(URL, headers=headers, params=params, timeout=10)
