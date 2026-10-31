@@ -3,12 +3,19 @@ import os
 from dotenv import load_dotenv
 import time
 import json
+from getpass import getpass
 
 load_dotenv()
 
 #Set up authentication details
 API_KEY = os.getenv("HEVY_API_KEY")
-print("API key loaded:", bool(API_KEY))
+
+if not API_KEY:
+    API_KEY = getpass("Enter your Hevy API key: ").strip()
+
+if not API_KEY:
+    raise ValueError("A Hevy API key is required.")
+
 PATH = "https://api.hevyapp.com/"
 URL = f"{PATH}v1/workouts"
 
@@ -66,11 +73,11 @@ while True:
         print(f"HTTP error occured: {http_err}")
         if response.status_code == 401:
             print("Tip: Double check you API key or Hevy Pro Status")
-            break
+            raise SystemExit("Exiting due to authentication error.")
         
     except requests.exceptions.RequestException as err:
         print(f"An error ocurred: {err}")
-        break
+        raise SystemExit("Exiting due to request error.")
         
 print(f"\nFinished! Total workouts retrieved: {len(all_workouts)}")
 
