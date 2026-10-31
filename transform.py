@@ -15,6 +15,7 @@ matplotlib.use("Agg")  # Save charts without pausing execution for a chart windo
 import matplotlib.pyplot as plt
 import pandas as pd
 from sklearn.linear_model import LinearRegression
+from cli import select_exercise
 
 DATA_FILE = Path(__file__).resolve().parent / "workouts_raw.json"
 CHART_FILE = Path(__file__).resolve().parent / "bench_press_trend.png"
@@ -120,11 +121,30 @@ def summarize_progress(best):
     )
 
     # Quarterly summary is the maximum session-level estimate in each calendar quarter.
+    # Quarterly strength analysis
     quarterly = best.copy()
-    quarterly["quarter"] = quarterly["start_time"].dt.tz_localize(None).dt.to_period("Q").astype(str)
+
+    # Extract the quarter from workout date
+    quarterly["quarter"] = (
+        quarterly["start_time"]
+        .dt.tz_localize(None)
+        .dt.to_period("Q")
+        .astype(str)
+    )
+
+    # Calculate quarterly strength metrics
     quarterly = (
-        quarterly.groupby(["exercise_id", "exercise_title", "quarter"], as_index=False)
-        .agg(best_e1rm_lb=("best_e1rm_lb", "max"), sessions=("workout_id", "nunique"))
+        quarterly
+        .groupby(
+            ["exercise_id", "exercise_title", "quarter"],
+            as_index=False
+        )
+        .agg(
+            median_e1rm_lb=("best_e1rm_lb", "median"),
+            peak_e1rm_lb=("best_e1rm_lb", "max"),
+            sessions=("workout_id", "nunique")
+        )
+        .sort_values(["exercise_id", "quarter"])
     )
     return summary, quarterly
 
@@ -225,33 +245,127 @@ def forecast_next_four_weeks(history):
     print(f"Experimental regression 4-week projection: {model.predict(X_target)[0]:.2f} lb")
     print(f"No-change 4-week projection: {train['rolling_e1rm'].iloc[-1]:.2f} lb")
     print("These are experimental projections, not validated strength targets.")
+    
+def plot_quarterly_progress(quarterly, exercise_id):
+    exercise_data = quarterly[
+        quarterly["exercise_id"] == exercise_id
+    ].sort_values("quarter")
+
+    if exercise_data.empty:
+        print("No quarterly data found.")
+        return
+    
+    # Convert quarter labels to quarterly periods
+    exercise_data = exercise_data.copy()
+
+    exercise_data["quarter_period"] = pd.PeriodIndex(
+        exercise_data["quarter"],
+        freq="Q"
+    )
+
+    # Generate all quarters between the first and last record
+    all_quarters = pd.period_range(
+        start=exercise_data["quarter_period"].min(),
+        end=exercise_data["quarter_period"].max(),
+        freq="Q"
+    )
+
+    # Insert missing quarters with NaN values
+    exercise_data = (
+        exercise_data
+        .set_index("quarter_period")
+        .reindex(all_quarters)
+    )
+
+    # Convert periods back to chart labels
+    exercise_data["quarter"] = exercise_data.index.astype(str)
+
+    exercise_title = exercise_data["exercise_title"].iloc[0]
+
+    plt.figure(figsize=(12, 6))
+
+    plt.plot(
+        exercise_data["quarter"],
+        exercise_data["median_e1rm_lb"],
+        marker="o",
+        label="Median e1RM"
+    )
+
+    plt.plot(
+        exercise_data["quarter"],
+        exercise_data["peak_e1rm_lb"],
+        marker="s",
+        linestyle="--",
+        label="Peak e1RM"
+    )
+    
+    # Annotate each quarter with its session count
+    for quarter, median, sessions in zip(
+        exercise_data["quarter"],
+        exercise_data["median_e1rm_lb"],
+        exercise_data["sessions"]
+    ):
+        if pd.notna(median):
+            plt.annotate(
+                f"n={int(sessions)}",
+                (quarter, median),
+                textcoords="offset points",
+                xytext=(0, -16),
+                ha="center",
+                fontsize=9
+            )
+
+    plt.title(f"{exercise_title} - Quarterly Strength Progression")
+    plt.xlabel("Quarter")
+    plt.ylabel("Estimated 1RM (lb)")
+    plt.xticks(rotation=45)
+    plt.legend()
+    plt.grid(True)
+    plt.margins(y=0.15)
+    plt.tight_layout()
+
+    plt.savefig("quarterly_progress.png", dpi=150)
+    plt.close()
 
 
 def main():
-    # Everything called here is defined above, including summarize_progress().
     workouts = load_workouts(DATA_FILE)
     df = flatten_sets(workouts)
     best = calculate_best_sets(df)
+
+    # Calculate quarterly statistics
     _, quarterly = summarize_progress(best)
 
-    print(f"\nQuarterly {EXERCISE_NAME} best e1RM:")
-    bench_quarters = quarterly.loc[quarterly["exercise_title"] == EXERCISE_NAME]
-    print(bench_quarters[["quarter", "sessions", "best_e1rm_lb"]].round(2).to_string(index=False))
+    # Select exercise from CLI
+    selected_exercise_id = select_exercise(quarterly)
 
-    history = get_exercise_history(best, EXERCISE_NAME)
-    print(f"\nBench sessions: {len(history)} | {history['start_time'].min()} to {history['start_time'].max()}")
-    save_trend_chart(history)
+    # Filter selected exercise
+    selected_quarters = quarterly[
+        quarterly["exercise_id"] == selected_exercise_id
+    ].sort_values("quarter")
 
-    results = four_week_backtest(history)
-    print(f"\nFour-week backtests: {len(results)}")
-    if not results.empty:
-        print(results[["target_date", "actual_date", "days_from_target", "actual", "lr_error", "baseline_error"]]
-              .tail(10).round(2).to_string(index=False))
-        print(f"Linear regression MAE: {results['lr_error'].mean():.2f} lb")
-        print(f"No-change baseline MAE: {results['baseline_error'].mean():.2f} lb")
-        print(f"Average absolute days from target: {results['days_from_target'].abs().mean():.2f}")
-    forecast_next_four_weeks(history)
+    # Retrieve exercise name
+    selected_exercise_name = selected_quarters["exercise_title"].iloc[0]
 
+    # Print quarterly analysis
+    print(f"\nQuarterly Analysis: {selected_exercise_name}")
+
+    print(
+        selected_quarters[
+            [
+                "quarter",
+                "sessions",
+                "median_e1rm_lb",
+                "peak_e1rm_lb"
+            ]
+        ].round(2).to_string(index=False)
+    )
+
+    # Generate quarterly chart
+    plot_quarterly_progress(quarterly, selected_exercise_id)
+
+    print(f"\nChart generated for {selected_exercise_name}!")
+    
 
 if __name__ == "__main__":
     main()
