@@ -16,6 +16,8 @@ import matplotlib.pyplot as plt
 import pandas as pd
 from sklearn.linear_model import LinearRegression
 from cli import select_exercise
+from forecast_features import run_feature_forecast
+from forecast_insights import forecast_insights
 
 DATA_FILE = Path(__file__).resolve().parent / "workouts_raw.json"
 CHART_FILE = Path(__file__).resolve().parent / "bench_press_trend.png"
@@ -149,14 +151,26 @@ def summarize_progress(best):
     return summary, quarterly
 
 
-def get_exercise_history(best, exercise_name):
-    history = best.loc[best["exercise_title"] == exercise_name,
-                       ["start_time", "best_e1rm_lb"]].copy()
-    history = history.sort_values("start_time").reset_index(drop=True)
+def get_exercise_history(best, exercise_id):
+
+    history = best.loc[
+        best["exercise_id"] == exercise_id,
+        ["start_time", "best_e1rm_lb"]
+    ].copy()
+
+    history = history.sort_values(
+        "start_time"
+    ).reset_index(drop=True)
+
     if history.empty:
-        raise ValueError(f"No eligible records for {exercise_name!r}.")
-    # Causal smoothing: each median uses the current and previous two sessions only.
-    history["rolling_e1rm"] = history["best_e1rm_lb"].rolling(3, min_periods=3).median()
+        return history
+
+    history["rolling_e1rm"] = (
+        history["best_e1rm_lb"]
+        .rolling(3, min_periods=3)
+        .median()
+    )
+
     return history
 
 def save_trend_chart(history):
@@ -212,6 +226,20 @@ def four_week_backtest(history):
         lr_prediction = model.predict(X_target)[0]
         baseline_prediction = train["rolling_e1rm"].iloc[-1]
         actual = test["rolling_e1rm"]
+        
+        # Damped trend: project 50% of the estimated daily trend
+        damping_factor = 0.5
+
+        days_ahead = (
+            target_date - cutoff
+        ).total_seconds() / 86400
+
+        trend_per_day = model.coef_[0]
+
+        damped_prediction = (
+            baseline_prediction
+            + damping_factor * trend_per_day * days_ahead
+        )
 
         results.append({
             "forecast_date": cutoff,
@@ -223,28 +251,144 @@ def four_week_backtest(history):
             "baseline_prediction": baseline_prediction,
             "lr_error": abs(actual - lr_prediction),
             "baseline_error": abs(actual - baseline_prediction),
+            "damped_prediction": damped_prediction,
+            "damped_error": abs(actual - damped_prediction),
         })
+        
     return pd.DataFrame(results)
 
 
+
+
 def forecast_next_four_weeks(history):
-    cutoff = history["start_time"].max()
-    train = history.loc[
-        (history["start_time"] >= cutoff - pd.Timedelta(weeks=6))
-    ].dropna(subset=["rolling_e1rm"])
-    if len(train) < 4:
-        print("Not enough recent sessions for a regression projection.")
+
+    observed = history.dropna(
+        subset=["rolling_e1rm"]
+    ).copy()
+
+    if len(observed) < 4:
+        print("\nForecast unavailable: insufficient workout history.")
         return
-    origin = train["start_time"].min()
-    X = pd.DataFrame({"days": (train["start_time"] - origin).dt.total_seconds() / 86400})
+
+    # Backtest all three models
+    results = four_week_backtest(history)
+
+    if len(results) < 5:
+        print(
+            f"\nForecast unavailable: only {len(results)} "
+            "valid historical backtests (minimum 5)."
+        )
+        return
+
+    # Historical forecasting errors
+    model_errors = {
+        "No-change baseline": results["baseline_error"].mean(),
+        "Linear Regression": results["lr_error"].mean(),
+        "Damped Trend": results["damped_error"].mean()
+    }
+
+    # Use most recent six weeks of workouts
+    cutoff = observed["start_time"].max()
+
+    train = observed.loc[
+        observed["start_time"] >= cutoff - pd.Timedelta(weeks=6)
+    ].copy()
+
+    current_strength = observed["rolling_e1rm"].iloc[-1]
     target_date = cutoff + pd.Timedelta(weeks=4)
-    X_target = pd.DataFrame({"days": [(target_date - origin).total_seconds() / 86400]})
-    model = LinearRegression().fit(X, train["rolling_e1rm"])
-    print(f"\nLatest raw e1RM: {history['best_e1rm_lb'].iloc[-1]:.2f} lb")
-    print(f"Latest smoothed e1RM: {history['rolling_e1rm'].iloc[-1]:.2f} lb")
-    print(f"Experimental regression 4-week projection: {model.predict(X_target)[0]:.2f} lb")
-    print(f"No-change 4-week projection: {train['rolling_e1rm'].iloc[-1]:.2f} lb")
-    print("These are experimental projections, not validated strength targets.")
+    
+    # Check whether the forecast date is already in the past
+    today = pd.Timestamp.now(tz="UTC")
+
+    if target_date <= today:
+        print("\nForecast unavailable: workout history is outdated.")
+        print(f"Last eligible workout: {cutoff.date()}")
+        print(f"Forecast target date: {target_date.date()}")
+        print("Log a new workout before generating a future forecast.")
+        return
+
+    # Baseline always available
+    predictions = {
+        "No-change baseline": current_strength
+    }
+
+    if len(train) >= 4:
+
+        origin = train["start_time"].min()
+
+        X_train = pd.DataFrame({
+            "days": (
+                train["start_time"] - origin
+            ).dt.total_seconds() / 86400
+        })
+
+        X_target = pd.DataFrame({
+            "days": [
+                (target_date - origin).total_seconds() / 86400
+            ]
+        })
+
+        model = LinearRegression()
+        model.fit(X_train, train["rolling_e1rm"])
+
+        # Full linear regression
+        lr_prediction = model.predict(X_target)[0]
+
+        # Damped trend
+        days_ahead = (
+            target_date - cutoff
+        ).total_seconds() / 86400
+
+        damped_prediction = (
+            current_strength
+            + 0.5 * model.coef_[0] * days_ahead
+        )
+
+        predictions["Linear Regression"] = lr_prediction
+        predictions["Damped Trend"] = damped_prediction
+
+    # Select lowest historical MAE among available models
+    selected_model = min(
+        predictions,
+        key=lambda name: model_errors[name]
+    )
+
+    selected_prediction = predictions[selected_model]
+
+    progress_lb = selected_prediction - current_strength
+
+    progress_pct = (
+        progress_lb / current_strength * 100
+        if current_strength > 0 else float("nan")
+    )
+
+    print("\n===== FOUR-WEEK STRENGTH FORECAST =====")
+
+    print(f"Historical backtests: {len(results)}")
+
+    print("\nModel comparison:")
+
+    for name, mae in model_errors.items():
+        print(f"{name}: MAE = {mae:.2f} lb")
+
+    print("\nCandidate predictions:")
+
+    for name, prediction in predictions.items():
+        print(f"{name}: {prediction:.2f} lb")
+
+    print(f"\nSelected model: {selected_model}")
+    print(f"Current smoothed e1RM: {current_strength:.2f} lb")
+    print(f"Forecast date: {target_date.date()}")
+    print(f"Four-week forecast: {selected_prediction:.2f} lb")
+
+    print(f"Predicted change: {progress_lb:+.2f} lb")
+    print(f"Predicted progress: {progress_pct:+.2f}%")
+
+    print(
+        "\nExperimental model selection based on overlapping "
+        "historical backtests; accuracy is not independently validated."
+    )
+
     
 def plot_quarterly_progress(quarterly, exercise_id):
     exercise_data = quarterly[
@@ -363,6 +507,18 @@ def main():
 
     # Generate quarterly chart
     plot_quarterly_progress(quarterly, selected_exercise_id)
+    
+    run_feature_forecast(
+    df,
+    best,
+    selected_exercise_id
+    )
+    
+    forecast_insights(df, best, selected_exercise_id)
+    
+    history = get_exercise_history(best, selected_exercise_id)
+
+    # forecast_next_four_weeks(history)
 
     print(f"\nChart generated for {selected_exercise_name}!")
     
