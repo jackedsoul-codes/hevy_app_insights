@@ -17,6 +17,7 @@ Features
 - Data sufficiency checks: Avoid generating certain predictions when there is too little or stale exercise history.
 
 How it works
+
 Hevy REST API
     |
     v
@@ -44,6 +45,7 @@ api_call.py  -->  workouts_raw.json (local / private)
                   +-------------+-------------+
                                 |
                     Terminal results + chart
+      
 
 Strength calculation
 
